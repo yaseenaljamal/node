@@ -5,14 +5,17 @@
 #ifndef V8_HEAP_OBJECTS_VISITING_INL_H_
 #define V8_HEAP_OBJECTS_VISITING_INL_H_
 
+#include <optional>
+
 #include "src/base/logging.h"
 #include "src/heap/mark-compact.h"
-#include "src/heap/object-lock.h"
+#include "src/heap/object-lock-inl.h"
 #include "src/heap/objects-visiting.h"
 #include "src/objects/arguments.h"
 #include "src/objects/data-handler-inl.h"
 #include "src/objects/free-space-inl.h"
 #include "src/objects/js-array-buffer-inl.h"
+#include "src/objects/js-objects.h"
 #include "src/objects/js-weak-refs-inl.h"
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/module-inl.h"
@@ -48,7 +51,6 @@ inline bool ContainsReadOnlyMap(PtrComprCageBase, Tagged<HeapObject>) {
   V(BytecodeArray)                        \
   V(BytecodeWrapper)                      \
   V(ByteArray)                            \
-  V(CallHandlerInfo)                      \
   V(Cell)                                 \
   V(Code)                                 \
   V(CodeWrapper)                          \
@@ -62,6 +64,7 @@ inline bool ContainsReadOnlyMap(PtrComprCageBase, Tagged<HeapObject>) {
   V(FeedbackVector)                       \
   V(FixedArray)                           \
   V(FixedDoubleArray)                     \
+  V(FunctionTemplateInfo)                 \
   V(InstructionStream)                    \
   V(PreparseData)                         \
   V(PropertyArray)                        \
@@ -174,6 +177,17 @@ ResultType HeapVisitor<ResultType, ConcreteVisitor>::Visit(
     case kVisitorIdCount:
       UNREACHABLE();
   }
+  // TODO(chromium:327992715): Remove once we have some clarity why execution
+  // can reach this point.
+  {
+    Isolate* isolate;
+    if (GetIsolateFromHeapObject(object, &isolate)) {
+      isolate->PushParamsAndDie(
+          reinterpret_cast<void*>(object.ptr()),
+          reinterpret_cast<void*>(map.ptr()),
+          reinterpret_cast<void*>(static_cast<intptr_t>(map->visitor_id())));
+    }
+  }
   UNREACHABLE();
   // Make the compiler happy.
   return ResultType();
@@ -255,7 +269,9 @@ ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitJSObjectFast(
 template <typename ResultType, typename ConcreteVisitor>
 ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitJSApiObject(
     Tagged<Map> map, Tagged<JSObject> object) {
-  return VisitJSObjectSubclass<JSObject, JSObject::BodyDescriptor>(map, object);
+  return VisitJSObjectSubclass<JSObject,
+                               JSAPIObjectWithEmbedderSlots::BodyDescriptor>(
+      map, object);
 }
 
 template <typename ResultType, typename ConcreteVisitor>
@@ -292,6 +308,20 @@ ResultType HeapVisitor<ResultType, ConcreteVisitor>::VisitJSObjectSubclass(
   // used fields.
   TBodyDescriptor::IterateBody(map, object, used_size, visitor);
   return size;
+}
+
+template <typename ResultType, typename ConcreteVisitor>
+template <typename TSlot>
+std::optional<Tagged<Object>>
+HeapVisitor<ResultType, ConcreteVisitor>::GetObjectFilterReadOnlyAndSmiFast(
+    TSlot slot) const {
+  auto raw = slot.Relaxed_Load_Raw();
+  // raw is either Tagged_t or Address depending on the slot type. Both can be
+  // cast to Tagged_t for the fast check.
+  if (FastInReadOnlySpaceOrSmallSmi(static_cast<Tagged_t>(raw))) {
+    return std::nullopt;
+  }
+  return TSlot::RawToTagged(ObjectVisitorWithCageBases::cage_base(), raw);
 }
 
 template <typename ResultType, typename ConcreteVisitor>

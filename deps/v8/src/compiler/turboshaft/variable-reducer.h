@@ -55,11 +55,9 @@ namespace v8::internal::compiler::turboshaft {
 // with constant inputs introduced by `VariableReducer` need to be eliminated.
 template <class AfterNext>
 class VariableReducer : public RequiredOptimizationReducer<AfterNext> {
-protected:
   using Next = RequiredOptimizationReducer<AfterNext>;
   using Snapshot = SnapshotTable<OpIndex, VariableData>::Snapshot;
 
-private:
   struct GetActiveLoopVariablesIndex {
     IntrusiveSetIndex& operator()(Variable var) const {
       return var.data().active_loop_variables_index;
@@ -152,8 +150,8 @@ private:
     is_temporary_ = false;
   }
 
-  OpIndex REDUCE(Goto)(Block* destination, bool is_backedge) {
-    OpIndex result = Next::ReduceGoto(destination, is_backedge);
+  V<None> REDUCE(Goto)(Block* destination, bool is_backedge) {
+    V<None> result = Next::ReduceGoto(destination, is_backedge);
     if (!destination->IsBound()) {
       return result;
     }

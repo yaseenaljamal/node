@@ -358,11 +358,21 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
       IsolateAddressId::kCEntryFPAddress, masm->isolate());
   __ push(__ ExternalReferenceAsOperand(c_entry_fp, edi));
 
+  ExternalReference fast_c_call_fp =
+      ExternalReference::fast_c_call_caller_fp_address(masm->isolate());
+  __ push(__ ExternalReferenceAsOperand(fast_c_call_fp, edi));
+
+  ExternalReference fast_c_call_pc =
+      ExternalReference::fast_c_call_caller_pc_address(masm->isolate());
+  __ push(__ ExternalReferenceAsOperand(fast_c_call_pc, edi));
+
   // Clear c_entry_fp, now we've pushed its previous value to the stack.
   // If the c_entry_fp is not already zero and we don't clear it, the
   // StackFrameIteratorForProfiler will assume we are executing C++ and miss the
   // JS frames on top.
   __ mov(__ ExternalReferenceAsOperand(c_entry_fp, edi), Immediate(0));
+  __ mov(__ ExternalReferenceAsOperand(fast_c_call_fp, edi), Immediate(0));
+  __ mov(__ ExternalReferenceAsOperand(fast_c_call_pc, edi), Immediate(0));
 
   // Store the context address in the previously-reserved slot.
   ExternalReference context_address = ExternalReference::Create(
@@ -396,6 +406,7 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
   ExternalReference exception = ExternalReference::Create(
       IsolateAddressId::kExceptionAddress, masm->isolate());
   __ mov(__ ExternalReferenceAsOperand(exception, edi), eax);
+
   __ Move(eax, masm->isolate()->factory()->exception());
   __ jmp(&exit);
 
@@ -420,6 +431,8 @@ void Generate_JSEntryVariant(MacroAssembler* masm, StackFrame::Type type,
   __ bind(&not_outermost_js_2);
 
   // Restore the top frame descriptor from the stack.
+  __ pop(__ ExternalReferenceAsOperand(fast_c_call_pc, edi));
+  __ pop(__ ExternalReferenceAsOperand(fast_c_call_fp, edi));
   __ pop(__ ExternalReferenceAsOperand(c_entry_fp, edi));
 
   // Restore callee-saved registers (C calling conventions).
@@ -4085,7 +4098,8 @@ void SwitchToTheCentralStackIfNeeded(MacroAssembler* masm, int edi_slot_index) {
             Immediate(ER::isolate_address(masm->isolate())));
     __ mov(Operand(esp, 1 * kSystemPointerSize), kOldSPRegister);
 
-    __ CallCFunction(ER::wasm_switch_to_the_central_stack(), 2);
+    __ CallCFunction(ER::wasm_switch_to_the_central_stack(), 2,
+                     SetIsolateDataSlots::kNo);
     __ mov(central_stack_sp, kReturnRegister0);
 
     __ pop(kRuntimeCallFunctionRegister);
@@ -4131,7 +4145,8 @@ void SwitchFromTheCentralStackIfNeeded(MacroAssembler* masm) {
     __ PrepareCallCFunction(1, ecx);
     __ Move(Operand(esp, 0 * kSystemPointerSize),
             Immediate(ER::isolate_address(masm->isolate())));
-    __ CallCFunction(ER::wasm_switch_from_the_central_stack(), 1);
+    __ CallCFunction(ER::wasm_switch_from_the_central_stack(), 1,
+                     SetIsolateDataSlots::kNo);
 
     __ pop(kReturnRegister1);
     __ pop(kReturnRegister0);
@@ -4141,6 +4156,16 @@ void SwitchFromTheCentralStackIfNeeded(MacroAssembler* masm) {
 }
 
 }  // namespace
+
+void Builtins::Generate_WasmToOnHeapWasmToJsTrampoline(MacroAssembler* masm) {
+  // Load the code pointer from the WasmApiFunctionRef and tail-call there.
+  Register api_function_ref = wasm::kGpParamRegisters[0];
+  Register code_object = edi;  // Not part of kGpParamRegisters.
+  __ mov(code_object,
+         FieldOperand(api_function_ref, WasmApiFunctionRef::kCodeOffset));
+  __ jmp(FieldOperand(code_object, Code::kInstructionStartOffset));
+}
+
 #endif  // V8_ENABLE_WEBASSEMBLY
 
 void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
@@ -4277,7 +4302,7 @@ void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
     __ mov(Operand(esp, 1 * kSystemPointerSize), Immediate(0));  // argv.
     __ Move(esi, Immediate(ER::isolate_address(masm->isolate())));
     __ mov(Operand(esp, 2 * kSystemPointerSize), esi);
-    __ CallCFunction(find_handler, 3);
+    __ CallCFunction(find_handler, 3, SetIsolateDataSlots::kNo);
   }
 
   // Retrieve the handler context, SP and FP.
@@ -4434,7 +4459,8 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
       argc = CallApiCallbackGenericDescriptor::ActualArgumentsCountRegister();
       topmost_script_having_context = CallApiCallbackGenericDescriptor::
           TopmostScriptHavingContextRegister();
-      callback = CallApiCallbackGenericDescriptor::CallHandlerInfoRegister();
+      callback =
+          CallApiCallbackGenericDescriptor::FunctionTemplateInfoRegister();
       holder = CallApiCallbackGenericDescriptor::HolderRegister();
       break;
 
@@ -4494,7 +4520,8 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
   __ PushRoot(RootIndex::kUndefinedValue);  // kNewTarget
   switch (mode) {
     case CallApiCallbackMode::kGeneric:
-      __ push(FieldOperand(callback, CallHandlerInfo::kDataOffset));
+      __ push(
+          FieldOperand(callback, FunctionTemplateInfo::kCallbackDataOffset));
       break;
 
     case CallApiCallbackMode::kOptimizedNoProfiling:
@@ -4548,13 +4575,13 @@ void Builtins::Generate_CallApiCallbackImpl(MacroAssembler* masm,
     // Target parameter.
     static_assert(ApiCallbackExitFrameConstants::kTargetOffset ==
                   2 * kSystemPointerSize);
-    __ push(FieldOperand(callback, CallHandlerInfo::kOwnerTemplateOffset));
+    __ push(callback);
 
     __ PushReturnAddressFrom(argc);
 
     __ mov(api_function_address,
            FieldOperand(callback,
-                        CallHandlerInfo::kMaybeRedirectedCallbackOffset));
+                        FunctionTemplateInfo::kMaybeRedirectedCallbackOffset));
 
     __ EnterExitFrame(kApiArgc + kApiStackSpace, StackFrame::API_CALLBACK_EXIT,
                       api_function_address);
@@ -4692,7 +4719,7 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   static constexpr int kNameOnStackSize = 1;
   static constexpr int kStackUnwindSpace = PCA::kArgsLength + kNameOnStackSize;
 
-  // The API function takes a name handle and v8::PropertyCallbackInfo
+  // The API function takes a name local handle and v8::PropertyCallbackInfo
   // reference, allocate them in non-GCed space of the exit frame.
   static constexpr int kApiArgc = 2;
   static constexpr int kApiArg0Offset = 0 * kSystemPointerSize;
@@ -4714,8 +4741,12 @@ void Builtins::Generate_CallApiGetter(MacroAssembler* masm) {
   Operand info_object = ExitFrameStackSlotOperand(kApiArgsSize);
   __ mov(info_object, args_array);
 
-  __ RecordComment("Handle<Name>");
+  __ RecordComment("Local<Name>");
+#ifdef V8_ENABLE_DIRECT_LOCAL
+  __ mov(args_array, Operand(args_array, -kSystemPointerSize));
+#else
   __ sub(args_array, Immediate(kSystemPointerSize));
+#endif
   __ mov(ExitFrameStackSlotOperand(kApiArg0Offset), args_array);
   args_array = no_reg;
   __ RecordComment("&v8::PropertyCallbackInfo::args_");
